@@ -11,11 +11,13 @@ from typing import Tuple, Dict, Optional
 import multiprocessing as mp
 import itertools
 import json
+import random
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 import h5py
 import gzip
 import shutil
@@ -47,12 +49,15 @@ from memorize import (
 
 NETWORK_ARCHITECTURE = NetworkArchitecture((700, 200, 20))
 Environment.nb_steps = 100
-NUM_SEEDS = 10
-EPOCHS = 200
+NUM_SEEDS = 1
+EPOCHS = 10
 SWEEP_DURATION = 1.4
 
 CACHE_DIR = os.path.expanduser("/tmp/lnl-dendrite-data")
 CACHE_SUBDIR = "hdspikes"
+
+NUM_WORKERS = 1
+NUM_THREADS = 4
 
 class Data:
     def __init__(self, path_to_train_data: str, path_to_test_data: str):
@@ -112,13 +117,15 @@ class DefaultOptimizer:
         self.loss_history = []
         self.accuracy_history = []  # Classification accuracy at each epoch
 
-    def optimize(self, input_, desired_output, epochs):
+    def optimize(self, data_loader:DataLoader, epochs): #input_, desired_output, epochs):
         for e in trange(epochs):
             batch_loss = []
             batch_accuracy = []
-            for batch_x, batch_y in sparse_data_generator_from_hdf5_spikes(
-                input_, desired_output, SWEEP_DURATION, shuffle=True
-            ):
+            for batch_x, batch_y in data_loader:
+            
+            # sparse_data_generator_from_hdf5_spikes(
+            #     input_, desired_output, SWEEP_DURATION, shuffle=True
+            # ):
                 actual_output = self._forward(batch_x.to_dense())
 
                 self.optimizer.zero_grad()
@@ -295,80 +302,250 @@ def get_file(
 
 
 
-def sparse_data_generator_from_hdf5_spikes(
-    X, y, sweep_duration: float, shuffle=True,
-):
-    """ This generator takes a spike dataset and generates spiking network input as sparse tensors.
+# def sparse_data_generator_from_hdf5_spikes(
+#     X, y, sweep_duration: float, shuffle=True,
+# ):
+#     """ This generator takes a spike dataset and generates spiking network input as sparse tensors.
+
+#     Args:
+#         X: The data ( sample x event x 2 ) the last dim holds (time,neuron) tuples
+#         y: The labels
+#     """
+
+#     labels_ = np.array(y, dtype=np.int)
+#     number_of_batches = len(labels_) // Environment.batch_size
+#     sample_index = np.arange(len(labels_))
+
+#     # compute discrete firing times
+#     firing_times = X['times']
+#     units_fired = X['units']
+
+#     time_bins = np.linspace(0, sweep_duration, num=Environment.nb_steps)
+
+#     if shuffle:
+#         np.random.shuffle(sample_index)
+
+#     total_batch_count = 0
+#     counter = 0
+#     while counter < number_of_batches:
+#         batch_index = sample_index[
+#             Environment.batch_size
+#             * counter : Environment.batch_size
+#             * (counter + 1)
+#         ]
+
+#         coo = [[] for i in range(3)]
+#         for bc, idx in enumerate(batch_index):
+#             times = np.digitize(firing_times[idx], time_bins)
+#             units = units_fired[idx]
+#             batch = [bc for _ in range(len(times))]
+
+#             coo[0].extend(batch)
+#             coo[1].extend(times)
+#             coo[2].extend(units)
+
+#         i = torch.LongTensor(coo).to(Environment.device)
+#         v = torch.FloatTensor(np.ones(len(coo[0]))).to(Environment.device)
+
+#         X_batch = torch.sparse.FloatTensor(
+#             i,
+#             v,
+#             torch.Size(
+#                 [
+#                     Environment.batch_size,
+#                     Environment.nb_steps,
+#                     NETWORK_ARCHITECTURE.nb_units_by_layer[0],
+#                 ]
+#             ),
+#         ).to(Environment.device)
+#         y_batch = torch.tensor(labels_[batch_index], device=Environment.device)
+
+#         yield X_batch.to(device=Environment.device), y_batch.to(
+#             device=Environment.device
+#         )
+
+#         counter += 1
+        
+def sparse_data_generator_from_hdf5_spikes(X, y, batch_size, nb_steps, nb_units, max_time, shuffle=True):
+    """ This generator takes a spike dataset and generates spiking network input as sparse tensors. 
 
     Args:
         X: The data ( sample x event x 2 ) the last dim holds (time,neuron) tuples
         y: The labels
     """
+    device = Environment.device
 
-    labels_ = np.array(y, dtype=np.int)
-    number_of_batches = len(labels_) // Environment.batch_size
+    labels_ = np.array(y,dtype=int)
+    number_of_batches = len(labels_)//batch_size
     sample_index = np.arange(len(labels_))
 
     # compute discrete firing times
     firing_times = X['times']
     units_fired = X['units']
-
-    time_bins = np.linspace(0, sweep_duration, num=Environment.nb_steps)
+    
+    time_bins = np.linspace(0, max_time, num=nb_steps)
 
     if shuffle:
         np.random.shuffle(sample_index)
 
     total_batch_count = 0
     counter = 0
-    while counter < number_of_batches:
-        batch_index = sample_index[
-            Environment.batch_size
-            * counter : Environment.batch_size
-            * (counter + 1)
-        ]
+    while counter<number_of_batches:
+        batch_index = sample_index[batch_size*counter:batch_size*(counter+1)]
 
-        coo = [[] for i in range(3)]
-        for bc, idx in enumerate(batch_index):
+        coo = [ [] for i in range(3) ]
+        for bc,idx in enumerate(batch_index):
             times = np.digitize(firing_times[idx], time_bins)
             units = units_fired[idx]
             batch = [bc for _ in range(len(times))]
-
+            
             coo[0].extend(batch)
             coo[1].extend(times)
             coo[2].extend(units)
 
-        i = torch.LongTensor(coo).to(Environment.device)
-        v = torch.FloatTensor(np.ones(len(coo[0]))).to(Environment.device)
+        i = torch.LongTensor(coo).to(device)
+        v = torch.FloatTensor(np.ones(len(coo[0]))).to(device)
+    
+        X_batch = torch.sparse.FloatTensor(i, v, torch.Size([batch_size,nb_steps,nb_units])).to(device)
+        y_batch = torch.tensor(labels_[batch_index],device=device)
 
-        X_batch = torch.sparse.FloatTensor(
-            i,
-            v,
-            torch.Size(
-                [
-                    Environment.batch_size,
-                    Environment.nb_steps,
-                    NETWORK_ARCHITECTURE.nb_units_by_layer[0],
-                ]
-            ),
-        ).to(Environment.device)
-        y_batch = torch.tensor(labels_[batch_index], device=Environment.device)
-
-        yield X_batch.to(device=Environment.device), y_batch.to(
-            device=Environment.device
-        )
+        yield X_batch.to(device=device), y_batch.to(device=device)
 
         counter += 1
+        
+class SHDDataset(Dataset):
+    def __init__(self, train_file_path:str, nb_steps:int, nb_units:int, max_time:float)->None:
+        
+        train_file = h5py.File(train_file_path, 'r')
+        x_train = train_file['spikes']
+        y_train = train_file['labels']
+        
+        # compute discrete firing times
+        
+        self.data = [(torch.squeeze(measure.to_dense()), label) 
+                     for measure, label in 
+                     sparse_data_generator_from_hdf5_spikes(x_train, y_train, 1, nb_steps, nb_units, max_time, shuffle=False)]
+        
+        train_file.close()
+
+    def __len__(self)->int:
+        return len(self.data)
+
+    def __getitem__(self, idx)->Tuple[torch.Tensor, int]:
+        x, y = self.data[idx]
+        return x, y.item()
 
 
 def main():
     """Run training loop across multiple random seeds in parallel."""
-    get_shd_dataset(CACHE_DIR, CACHE_SUBDIR)
-    with mp.Pool(3) as pool:
+    #get_shd_dataset(CACHE_DIR, CACHE_SUBDIR)
+    
+    
+    # print(f'Creating the training dataloader ...')
+    # train_dataloader = DataLoader(training_data, batch_size=Environment.batch_size, shuffle=True, drop_last=True)
+    # print(f'Creating the testing dataloader ...')
+    # test_dataloader = DataLoader(testing_data, batch_size=Environment.batch_size, shuffle=False, drop_last=True)
+    
+    # print(f'Deleting uneccessary Dataset ...')
+    # del training_data
+    # del testing_data
+    
+    #worker(0,train_dataloader, test_dataloader)
+    
+    # train_dataloaders = [train_dataloader for _ in range(NUM_SEEDS)]
+    # test_dataloaders = [test_dataloader for _ in range(NUM_SEEDS)]
+    #torch.multiprocessing.set_sharing_strategy('file_system')
+    
+    # with mp.Pool(NUM_WORKERS) as pool:
+    #     pool.starmap(worker, zip(range(NUM_SEEDS), itertools.repeat(deepcopy(training_data)), itertools.repeat(deepcopy(testing_data))))
+    
+    # def init_worker(training_dataloader, testing_dataloader):
+    #     print(f'Initializing the workers ...')
+    #     global training_dataloader_
+    #     global testing_dataloader_
+    #     # store argument in the global variable for this process
+    #     training_dataloader_ = training_dataloader
+    #     testing_dataloader_ = testing_dataloader
+        
+    # print(f'Starting multi-processing ...')
+    # with mp.Pool(NUM_WORKERS, initializer=init_worker, initargs=(train_dataloader, test_dataloader)) as pool:
+    #     pool.map(worker, range(NUM_SEEDS))
+    
+    # print(f'Starting multi-processing ...')
+    
+    
+    with mp.Pool(NUM_WORKERS) as pool:
         pool.map(worker, range(NUM_SEEDS))
+    
+    #worker(0)
+    
+    # processes = []
+    # for seed_no in range(NUM_WORKERS):
+    #     p = mp.Process(target=worker, args=(seed_no, train_dataloader, test_dataloader))
+    #     p.start()
+    #     processes.append(p)
+    # for p in processes:
+    #     p.join()
+    
+    # with concurrent.futures.ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+    #     executor.map(worker, range(NUM_SEEDS), train_dataloaders, test_dataloaders)
 
 
-def worker(rep_num: int):
-    nets, optimizers = train_networks(rep_num)
+def worker(rep_num: int, set_seed:bool=True):
+    """_summary_
+
+    Parameters
+    ----------
+    rep_num : int
+        _description_
+    set_seed : bool, optional
+        _description_, by default True
+    """
+    torch.set_num_threads(NUM_THREADS)
+    print(f'Creating the training & testing data for seed no{rep_num}...')
+    training_data = SHDDataset('./data/shd_train.h5', Environment.nb_steps, NETWORK_ARCHITECTURE.nb_units_by_layer[0], SWEEP_DURATION)
+    testing_data = SHDDataset('./data/shd_test.h5', Environment.nb_steps, NETWORK_ARCHITECTURE.nb_units_by_layer[0], SWEEP_DURATION)
+    if set_seed:
+        torch.use_deterministic_algorithms(True)
+        random.seed(rep_num)
+        np.random.seed(rep_num)
+        torch.manual_seed(rep_num)
+        print(f'rep_num')
+        def seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2**32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+        g = torch.Generator()
+        g.manual_seed(rep_num)
+        train_dataloader = DataLoader(training_data, 
+                                    batch_size=Environment.batch_size, 
+                                    shuffle=True,
+                                    drop_last=True,
+                                    worker_init_fn=seed_worker,
+                                    generator=g)
+    
+        testing_dataloader = DataLoader(testing_data, 
+                                        batch_size=Environment.batch_size, 
+                                        shuffle=False, 
+                                        drop_last=True,
+                                        worker_init_fn=seed_worker,
+                                        generator=g)
+    else:
+        train_dataloader = DataLoader(training_data, 
+                                    batch_size=Environment.batch_size, 
+                                    shuffle=True,
+                                    drop_last=True)
+    
+        testing_dataloader = DataLoader(testing_data, 
+                                        batch_size=Environment.batch_size, 
+                                        shuffle=False, 
+                                        drop_last=True)
+        
+    print(f'Deleting unecessary training & testing data for seed no{rep_num}...')
+    del training_data
+    del testing_data
+    
+    nets, optimizers = train_networks(rep_num, train_dataloader, testing_dataloader)
     save_loss_history(
         optimizers,
         f'heidelberg_training_results_{rep_num}.csv',
@@ -377,48 +554,62 @@ def worker(rep_num: int):
 
 
 def train_networks(
-    rep_num: int, epochs: int = EPOCHS, set_seed: bool = True
+    rep_num: int, train_dataloader:DataLoader, test_dataloader:DataLoader, epochs: int = EPOCHS
 ) -> Tuple[Dict[str, SpikingNetwork], Dict[str, DefaultOptimizer]]:
     """Train a set of PRC models to memorize a random dataset."""
-    if set_seed:
-        torch.manual_seed(rep_num)
 
     nets = get_networks()
     optimizers = get_optimizers(nets)
 
-    path_to_train_data = os.path.join(CACHE_DIR, CACHE_SUBDIR, 'shd_train.h5')
-    path_to_test_data = os.path.join(CACHE_DIR, CACHE_SUBDIR, 'shd_test.h5')
+    # path_to_train_data = os.path.join(CACHE_DIR, CACHE_SUBDIR, 'shd_train.h5')
+    # path_to_test_data = os.path.join(CACHE_DIR, CACHE_SUBDIR, 'shd_test.h5')
 
-    with Data(path_to_train_data, path_to_test_data) as data:
-        for label in nets:
-            print(f'Training \"{label}\" - {rep_num}')
-            initial_train_accuracy = classification_accuracy(
-                data.x_train, data.y_train, nets[label]
-            )
-            initial_test_accuracy = classification_accuracy(
-                data.x_test, data.y_test, nets[label]
-            )
-            optimizers[label].optimize(
-                data.x_train, data.y_train, epochs
-            )
-            final_train_accuracy = classification_accuracy(
-                data.x_train, data.y_train, nets[label]
-            )
-            final_test_accuracy = classification_accuracy(
-                data.x_test, data.y_test, nets[label]
-            )
+    #with Data(path_to_train_data, path_to_test_data) as data:
+    for label in nets:
+        print(f'Training \"{label}\" - {rep_num}')
+        # initial_train_accuracy = classification_accuracy(
+        #     data.x_train, data.y_train, nets[label]
+        # )
+        # initial_test_accuracy = classification_accuracy(
+        #     data.x_test, data.y_test, nets[label]
+        # )
+        # optimizers[label].optimize(
+        #     data.x_train, data.y_train, epochs
+        # )
+        # final_train_accuracy = classification_accuracy(
+        #     data.x_train, data.y_train, nets[label]
+        # )
+        # final_test_accuracy = classification_accuracy(
+        #     data.x_test, data.y_test, nets[label]
+        # )
+        
+        initial_train_accuracy = classification_accuracy(
+            train_dataloader, nets[label]
+        )
+        initial_test_accuracy = classification_accuracy(
+            test_dataloader, nets[label]
+        )
+        optimizers[label].optimize(
+            train_dataloader, epochs
+        )
+        final_train_accuracy = classification_accuracy(
+            train_dataloader, nets[label]
+        )
+        final_test_accuracy = classification_accuracy(
+            test_dataloader, nets[label]
+        )
 
-            optimizers[label].test_accuracy = {
-                'initial': float(initial_test_accuracy),
-                'final': float(final_test_accuracy),
-            }
-            print(
-                f'Finished training \"{label}\" - {rep_num}; '
-                f'Initial Train Acc. {100 * initial_train_accuracy:.1f}%, '
-                f'Initial Test Acc. {100 * initial_test_accuracy:.1f}%.'
-                f'Final Train Acc. {100 * final_train_accuracy:.1f}%.'
-                f'Final Test Acc. {100 *  final_test_accuracy:.1f}%.'
-            )
+        optimizers[label].test_accuracy = {
+            'initial': float(initial_test_accuracy),
+            'final': float(final_test_accuracy),
+        }
+        print(
+            f'Finished training \"{label}\" - {rep_num}; '
+            f'Initial Train Acc. {100 * initial_train_accuracy:.1f}%, '
+            f'Initial Test Acc. {100 * initial_test_accuracy:.1f}%.'
+            f'Final Train Acc. {100 * final_train_accuracy:.1f}%.'
+            f'Final Test Acc. {100 *  final_test_accuracy:.1f}%.'
+        )
 
     return nets, optimizers
 
@@ -469,19 +660,19 @@ def get_networks() -> Dict[str, SpikingNetwork]:
         dendritic_spike_fn=dendritic_nl_fn,
     )
 
-    parallel_params = PRCNeuronParameters(
-        tau_mem=10e-3,
-        tau_syn=5e-3,
-        backprop_gain=0.05,
-        feedback_strength=15,
-        somatic_spike_fn=somatic_spike_fn,
-        dend_na_fn=dendritic_nl_fn,
-        dend_ca_fn=get_sigmoid_fn(threshold=4, sensitivity=10, gain=1),
-        dend_nmda_fn=dendritic_nl_fn,
-        tau_dend_na=5e-3,
-        tau_dend_ca=40e-3,
-        tau_dend_nmda=80e-3,
-    )
+    # parallel_params = PRCNeuronParameters(
+    #     tau_mem=10e-3,
+    #     tau_syn=5e-3,
+    #     backprop_gain=0.05,
+    #     feedback_strength=15,
+    #     somatic_spike_fn=somatic_spike_fn,
+    #     dend_na_fn=dendritic_nl_fn,
+    #     dend_ca_fn=get_sigmoid_fn(threshold=4, sensitivity=10, gain=1),
+    #     dend_nmda_fn=dendritic_nl_fn,
+    #     tau_dend_na=5e-3,
+    #     tau_dend_ca=40e-3,
+    #     tau_dend_nmda=80e-3,
+    # )
 
     simple_network_architecture = deepcopy(NETWORK_ARCHITECTURE)
     simple_network_architecture.weight_scale_by_layer = (3, 7)
@@ -489,38 +680,40 @@ def get_networks() -> Dict[str, SpikingNetwork]:
     two_compartment_network_architecture = deepcopy(NETWORK_ARCHITECTURE)
     two_compartment_network_architecture.weight_scale_by_layer = (0.5, 7)
 
-    parallel_network_architecture = deepcopy(NETWORK_ARCHITECTURE)
-    parallel_network_architecture.weight_scale_by_layer = (0.02, 7)
+    # parallel_network_architecture = deepcopy(NETWORK_ARCHITECTURE)
+    # parallel_network_architecture.weight_scale_by_layer = (0.02, 7)
 
     nets = {
         'One compartment': SpikingNetwork(
             neuron_params, simple_network_architecture
         ),
-        'No BAP': TwoCompartmentSpikingNetwork(
-            neuron_params, two_compartment_network_architecture
-        ),
-        'BAP': RecurrentSpikingNetwork(
-            neuron_params, two_compartment_network_architecture
-        ),
-        'Parallel subunits, no BAP': ParallelSpikingNetwork(
-            parallel_params, parallel_network_architecture
-        ),
-        'Parallel subunits + BAP (full PRC model)': PRCSpikingNetwork(
-            parallel_params, parallel_network_architecture
-        ),
+        # 'No BAP': TwoCompartmentSpikingNetwork(
+        #     neuron_params, two_compartment_network_architecture
+        # ),
+        # 'BAP': RecurrentSpikingNetwork(
+        #     neuron_params, two_compartment_network_architecture
+        # ),
+        # 'Parallel subunits, no BAP': ParallelSpikingNetwork(
+        #     parallel_params, parallel_network_architecture
+        # ),
+        # 'Parallel subunits + BAP (full PRC model)': PRCSpikingNetwork(
+        #     parallel_params, parallel_network_architecture
+        # ),
     }
     return nets
 
 
-def classification_accuracy(x_data, y_data, net: SpikingNetwork) -> float:
+def classification_accuracy(dataloader:DataLoader, net: SpikingNetwork) -> float:
     """ Computing classification accuracy on supplied data for each of the networks. """
     accuracies = []
-    for x_local, y_local in sparse_data_generator_from_hdf5_spikes(
-        x_data, y_data, SWEEP_DURATION, shuffle=False,
-    ):
+    for x_local, y_local in dataloader:
+    
+    # sparse_data_generator_from_hdf5_spikes(
+    #     x_data, y_data, SWEEP_DURATION, shuffle=False,
+    # ):
         accuracies.append(
             _minibatch_classification_accuracy(
-                x_local.to_dense(), y_local, net
+                x_local, y_local, net # Removed x_loval.to_dense() as already inside the Dataset
             )
         )
     return np.mean(accuracies)

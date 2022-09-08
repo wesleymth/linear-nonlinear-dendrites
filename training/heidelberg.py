@@ -50,7 +50,7 @@ from memorize import (
 NETWORK_ARCHITECTURE = NetworkArchitecture((700, 200, 20))
 Environment.nb_steps = 100
 NUM_SEEDS = 1
-EPOCHS = 10
+EPOCHS = 200
 SWEEP_DURATION = 1.4
 
 CACHE_DIR = os.path.expanduser("/tmp/lnl-dendrite-data")
@@ -687,12 +687,12 @@ def get_networks() -> Dict[str, SpikingNetwork]:
         'One compartment': SpikingNetwork(
             neuron_params, simple_network_architecture
         ),
-        # 'No BAP': TwoCompartmentSpikingNetwork(
-        #     neuron_params, two_compartment_network_architecture
-        # ),
-        # 'BAP': RecurrentSpikingNetwork(
-        #     neuron_params, two_compartment_network_architecture
-        # ),
+        'No BAP': TwoCompartmentSpikingNetwork(
+            neuron_params, two_compartment_network_architecture
+        ),
+        'BAP': RecurrentSpikingNetwork(
+            neuron_params, two_compartment_network_architecture
+        ),
         # 'Parallel subunits, no BAP': ParallelSpikingNetwork(
         #     parallel_params, parallel_network_architecture
         # ),

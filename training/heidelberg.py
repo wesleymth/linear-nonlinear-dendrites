@@ -414,24 +414,52 @@ def sparse_data_generator_from_hdf5_spikes(X, y, batch_size, nb_steps, nb_units,
         counter += 1
         
 class SHDDataset(Dataset):
-    def __init__(self, train_file_path:str, nb_steps:int, nb_units:int, max_time:float)->None:
+    """Spiking Heidelberg Dataset class to store the data and target into a single object.
+    Inherits from torch `Dataset` class which makes it compatible with a torch `Dataloader`.
+    """
+    def __init__(self, data_file_path:str, nb_steps:int, nb_units:int, max_time:float)->None:
+        """Initialize a SHDDataset object.
+
+        Parameters
+        ----------
+        data_file_path : str
+            The file path to the data file.
+        nb_steps : int
+            The number of steps.
+        nb_units : int
+            Number of hidden units used.
+        max_time : float
+            The maximum time.
+        """
+        data_file = h5py.File(data_file_path, 'r')
+        x_data = data_file['spikes']
+        y_data = data_file['labels']
         
-        train_file = h5py.File(train_file_path, 'r')
-        x_train = train_file['spikes']
-        y_train = train_file['labels']
-        
-        # compute discrete firing times
-        
+        #TODO: Get rid of `sparse_data_generator_from_hdf5_spikes` call and make the list comp cleaner.
         self.data = [(torch.squeeze(measure.to_dense()), label) 
                      for measure, label in 
-                     sparse_data_generator_from_hdf5_spikes(x_train, y_train, 1, nb_steps, nb_units, max_time, shuffle=False)]
+                     sparse_data_generator_from_hdf5_spikes(x_data, y_data, 1, nb_steps, nb_units, max_time, shuffle=False)]
         
-        train_file.close()
+        data_file.close()
 
     def __len__(self)->int:
+        """Returns the length of the dataset. 
+        """
         return len(self.data)
 
-    def __getitem__(self, idx)->Tuple[torch.Tensor, int]:
+    def __getitem__(self, idx:int)->Tuple[torch.Tensor, int]:
+        """Gets the items of the Dataset given an index.
+
+        Parameters
+        ----------
+        idx : int
+            The index to access the list attribute self.data
+
+        Returns
+        -------
+        Tuple[torch.Tensor, int]
+            A tuple of length 2 with in first position with a specific measure and its target in second position. 
+        """
         x, y = self.data[idx]
         return x, y.item()
 
@@ -492,19 +520,16 @@ def main():
 
 
 def worker(rep_num: int, set_seed:bool=True):
-    """_summary_
-
-    Parameters
-    ----------
-    rep_num : int
-        _description_
-    set_seed : bool, optional
-        _description_, by default True
-    """
     torch.set_num_threads(NUM_THREADS)
     print(f'Creating the training & testing data for seed no{rep_num}...')
-    training_data = SHDDataset('./data/shd_train.h5', Environment.nb_steps, NETWORK_ARCHITECTURE.nb_units_by_layer[0], SWEEP_DURATION)
-    testing_data = SHDDataset('./data/shd_test.h5', Environment.nb_steps, NETWORK_ARCHITECTURE.nb_units_by_layer[0], SWEEP_DURATION)
+    training_data = SHDDataset('./data/shd_train.h5', 
+                               Environment.nb_steps, 
+                               NETWORK_ARCHITECTURE.nb_units_by_layer[0], 
+                               SWEEP_DURATION)
+    testing_data = SHDDataset('./data/shd_test.h5', 
+                              Environment.nb_steps, 
+                              NETWORK_ARCHITECTURE.nb_units_by_layer[0], 
+                              SWEEP_DURATION)
     if set_seed:
         torch.use_deterministic_algorithms(True)
         random.seed(rep_num)
